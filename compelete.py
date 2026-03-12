@@ -346,9 +346,11 @@ DOG_BREED_ALIAS = {
     "german shepherd dog": "german shepherd",
     "gsd": "german shepherd",
     "husky": "siberian husky",
+    "siberian husky dog": "siberian husky",  # 新增别名，提升匹配率
     "border collie dog": "border collie",
     "bc": "border collie",
     "english bulldog": "bulldog",
+    "british bulldog": "bulldog",  # 新增别名，区分斗牛犬
     "rottie": "rottweiler",
     "doberman": "doberman pinscher",
     "great dane dog": "great dane",
@@ -391,7 +393,7 @@ def init_dog_model():
         messagebox.showerror("模型初始化失败", f"加载ResNet50出错：{str(e)}\n请检查PyTorch安装或网络")
         return None, None, None
 
-# -------------------------- 犬种识别核心函数 --------------------------
+# -------------------------- 犬种识别核心函数（修复误识别问题） --------------------------
 def recognize_dog_breed(img_path, model, preprocess, class_names):
     try:
         # 加载并预处理图片
@@ -401,40 +403,59 @@ def recognize_dog_breed(img_path, model, preprocess, class_names):
         # 模型推理（无梯度计算加速）
         with torch.no_grad():
             output = model(img_tensor)
-        pred_idx = torch.argmax(output, dim=1).item()
-        pred_class = class_names[pred_idx].lower()
         
-        # 清理预测标签（移除括号/数字）
-        clean_pred = re.sub(r"\(.*?\)|\d+", "", pred_class).replace("_", " ").strip()
+        # 🌟 核心修复：取前5个预测结果，优先匹配本地犬种库，避免单结果误判
+        top5_probs, top5_indices = torch.topk(output, k=5, dim=1)
+        top5_classes = [class_names[idx].lower() for idx in top5_indices[0]]
         
-        # 步骤1：别名映射（提升匹配率）
-        if clean_pred in DOG_BREED_ALIAS:
-            clean_pred = DOG_BREED_ALIAS[clean_pred]
+        dog_info = None
+        clean_pred_list = []
         
-        # 步骤2：匹配本地犬种百科
-        if clean_pred in DOG_BREED_ENCYCLOPEDIA:
-            dog_info = DOG_BREED_ENCYCLOPEDIA[clean_pred]
-        else:
-            # 步骤3：关键词模糊匹配
-            dog_info = None
-            core_keywords = [word for word in clean_pred.split() if len(word) > 2]
-            if core_keywords:
-                for keyword in core_keywords:
-                    for breed in DOG_BREED_ENCYCLOPEDIA.keys():
-                        if keyword in breed or breed in keyword:
-                            dog_info = DOG_BREED_ENCYCLOPEDIA[breed]
+        # 遍历前5个预测结果，逐个匹配本地犬种百科
+        for pred_class in top5_classes:
+            # 清理预测标签（移除括号/数字/多余空格）
+            clean_pred = re.sub(r"\(.*?\)|\d+", "", pred_class).replace("_", " ").strip()
+            clean_pred_list.append(clean_pred)
+            
+            # 步骤1：别名（提升匹配率）
+            if clean_pred in DOG_BREED_ALIAS:
+                clean_pred = DOG_BREED_ALIAS[clean_pred]
+            
+            # 步骤2：匹配本地犬种百科
+            if clean_pred in DOG_BREED_ENCYCLOPEDIA:
+                dog_info = DOG_BREED_ENCYCLOPEDIA[clean_pred]
+                break
+        
+        # 如果前5个都没匹配到，再做关键词模糊匹配
+        if not dog_info:
+            for clean_pred in clean_pred_list:
+                core_keywords = [word for word in clean_pred.split() if len(word) > 2]
+                if core_keywords:
+                    for keyword in core_keywords:
+                        # 优先匹配哈士奇等易误判犬种的关键词
+                        if keyword == "husky":
+                            dog_info = DOG_BREED_ENCYCLOPEDIA["siberian husky"]
                             break
+                        elif keyword == "bulldog":
+                            dog_info = DOG_BREED_ENCYCLOPEDIA["bulldog"]
+                            break
+                        for breed in DOG_BREED_ENCYCLOPEDIA.keys():
+                            if keyword in breed or breed in keyword:
+                                dog_info = DOG_BREED_ENCYCLOPEDIA[breed]
+                                break
                     if dog_info:
                         break
+                if dog_info:
+                    break
         
-        # 步骤4：百度百科
+        # 步骤3：百度百科
         if not dog_info:
-            dog_info = query_dog_info_from_baike(clean_pred)
+            dog_info = query_dog_info_from_baike(clean_pred_list[0])
         
         # 最终
         if not dog_info:
             dog_info = {
-                "name": clean_pred.title().replace(" ", ""),
+                "name": clean_pred_list[0].title().replace(" ", ""),
                 "alias": "未知犬种",
                 "size": "未知",
                 "weight": "未知",
@@ -444,7 +465,7 @@ def recognize_dog_breed(img_path, model, preprocess, class_names):
                 "coat": "未知",
                 "origin": "未知",
                 "feeding": "未知",
-                "intro": f"未识别到具体犬种：{clean_pred}\n可能是混血犬或小众品种。"
+                "intro": f"未识别到具体犬种：{clean_pred_list[0]}\n可能是混血犬或小众品种。"
             }
         
         return img, dog_info
@@ -464,7 +485,9 @@ def query_dog_info_from_baike(dog_breed):
         "siberian husky": "西伯利亚雪橇犬",
         "border collie": "边境牧羊犬",
         "corgi": "柯基犬",
-        "poodle": "贵宾犬"
+        "poodle": "贵宾犬",
+        "bulldog": "英国斗牛犬",
+        "husky": "哈士奇"  # 新增哈士奇映射
     }
     search_name = en2zh.get(dog_breed, dog_breed)
     
@@ -647,13 +670,13 @@ class DogBreedRecognitionApp(ctk.CTk):
 
 【详细介绍】：
 {dog_info['intro']}
-            """
+            """.strip()
             
             # 更新界面
             self.breed_name_label.configure(text=f"识别结果：{dog_info['name']}")
             self.info_text.configure(state="normal")
             self.info_text.delete("0.0", tk.END)
-            self.info_text.insert("0.0", info_str.strip())
+            self.info_text.insert("0.0", info_str)
             self.info_text.configure(state="disabled")
         
         # 恢复按钮状态
@@ -671,6 +694,6 @@ if __name__ == "__main__":
         messagebox.showinfo("缺少依赖", "请先安装依赖库：\npip install requests beautifulsoup4")
         exit(1)
     
-    # 启动应用
+    # 启动应用 
     app = DogBreedRecognitionApp()
     app.mainloop()
